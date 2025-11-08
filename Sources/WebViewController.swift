@@ -1,7 +1,8 @@
 import UIKit
 import WebKit
 
-final class WebViewController: UIViewController, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
+// Removemos a conformidade com WKScriptMessageHandler
+final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
     private var webView: WKWebView!
     private let partnerURL = URL(string: "https://partner.obynexbroker.com/")!
     private var lastTokenSnippet: String?
@@ -10,45 +11,22 @@ final class WebViewController: UIViewController, WKScriptMessageHandler, WKNavig
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
 
-        let scriptSource = """
-        (function() {
-          function findToken() {
-            try {
-              var token = null;
-              token = window.localStorage.getItem('auth_token')
-                || window.localStorage.getItem('token')
-                || window.localStorage.getItem('accessToken')
-                || window.sessionStorage.getItem('auth_token')
-                || window.sessionStorage.getItem('token')
-                || window.sessionStorage.getItem('accessToken');
-              if (!token && window.__INITIAL_STATE__ && window.__INITIAL_STATE__.auth) token = window.__INITIAL_STATE__.auth.token;
-              if (!token) {
-                var m = document.cookie.match(/(?:^|; )(?:auth_token|token|accessToken)=([^;]+)/);
-                if (m) token = decodeURIComponent(m[1]);
-              }
-              if (token && window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.nativeHandler) {
-                window.webkit.messageHandlers.nativeHandler.postMessage({type:'auth_token', token: token});
-              }
-            } catch(e) { /* silent */ }
-          }
-          window.addEventListener('load', findToken);
-          setInterval(findToken, 3000);
-        })();
-        """
+        // --- Injeção de JavaScript REMOVIDA ---
+        // A lógica de 'scriptSource', 'userScript' e 'nativeHandler'
+        // foi removida pois não funciona com cookies HttpOnly.
 
-        let userContentController = WKUserContentController()
-        let userScript = WKUserScript(source: scriptSource, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
-        userContentController.addUserScript(userScript)
-        userContentController.add(self, name: "nativeHandler")
-
+        // Configuração padrão do WebView
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.preferences.javaScriptEnabled = true
-        configuration.userContentController = userContentController
+        // Não precisamos mais do userContentController para esta lógica
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        
+        // O WKNavigationDelegate é agora o ponto principal
         webView.navigationDelegate = self
         webView.uiDelegate = self
+        
         webView.isOpaque = false
         webView.backgroundColor = .systemBackground
         webView.scrollView.backgroundColor = .systemBackground
@@ -67,42 +45,62 @@ final class WebViewController: UIViewController, WKScriptMessageHandler, WKNavig
         webView.load(request)
     }
 
-    deinit {
-        webView?.configuration.userContentController.removeScriptMessageHandler(forName: "nativeHandler")
-    }
+    // --- deinit e userContentController REMOVIDOS ---
+    // Não são mais necessários após a remoção do WKScriptMessageHandler
 
-    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard message.name == "nativeHandler",
-              let body = message.body as? [String: Any],
-              let type = body["type"] as? String,
-              type == "auth_token",
-              let token = body["token"] as? String,
-              !token.isEmpty else {
+    // Esta função (WKNavigationDelegate) é a nova lógica de captura
+    func webView(_ webView: WKWebView,
+                 decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+
+        // 1. Tentar obter a resposta HTTP
+        guard let httpResponse = navigationResponse.response as? HTTPURLResponse,
+              let headers = httpResponse.allHeaderFields as? [String: String] else {
+            decisionHandler(.allow)
             return
         }
 
-        let snippet = tokenSnippet(from: token)
-        guard snippet != lastTokenSnippet else {
-            return
-        }
-        lastTokenSnippet = snippet
+        // 2. Procurar pelo cabeçalho 'Set-Cookie' (maiúsculas/minúsculas)
+        let setCookieHeader = headers["Set-Cookie"] ?? headers["set-cookie"]
 
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            let alert = UIAlertController(title: "Token capturado",
-                                          message: "Token capturado: \(snippet)",
-                                          preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "OK", style: .default, handler: nil))
-            if self.presentedViewController == nil {
-                self.present(alert, animated: true, completion: nil)
-            } else {
-                self.dismiss(animated: false) {
-                    self.present(alert, animated: true, completion: nil)
+        if let cookieString = setCookieHeader {
+            
+            // 3. O cabeçalho pode conter múltiplos cookies, então dividimos
+            let cookies = cookieString.components(separatedBy: ";")
+            
+            for cookie in cookies {
+                let trimmedCookie = cookie.trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                // 4. Procurar pelo nosso cookie 'aff_sid'
+                if trimmedCookie.hasPrefix("aff_sid=") {
+                    // Extrai o valor do token (o que vem depois de 'aff_sid=')
+                    let token = String(trimmedCookie.dropFirst("aff_sid=".count))
+                    
+                    if !token.isEmpty {
+                        let snippet = tokenSnippet(from: token)
+                        
+                        // 5. Evitar mostrar o mesmo token repetidamente
+                        guard snippet != lastTokenSnippet else {
+                            continue // Passa para o próximo cookie
+                        }
+                        lastTokenSnippet = snippet
+
+                        // 6. Mostrar o alerta (na thread principal)
+                        DispatchQueue.main.async { [weak self] in
+                            self?.showAlert(with: snippet)
+                        }
+                        // Já encontramos o que queríamos, podemos parar o loop
+                        break
+                    }
                 }
             }
         }
+
+        // 7. Permitir que a navegação continue
+        decisionHandler(.allow)
     }
 
+    // Esta função lida com pop-ups (links target="_blank")
     func webView(_ webView: WKWebView,
                  createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction,
@@ -111,6 +109,24 @@ final class WebViewController: UIViewController, WKScriptMessageHandler, WKNavig
             webView.load(navigationAction.request)
         }
         return nil
+    }
+    
+    // MARK: - Funções Auxiliares (Helpers)
+
+    private func showAlert(with snippet: String) {
+        let alert = UIAlertController(title: "Token (aff_sid) Capturado",
+                                      message: "Token: \(snippet)",
+                                      preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default, handler: nil))
+        
+        // Lógica para evitar conflito de alertas
+        if self.presentedViewController == nil {
+            self.present(alert, animated: true, completion: nil)
+        } else {
+            self.dismiss(animated: false) {
+                self.present(alert, animated: true, completion: nil)
+            }
+        }
     }
 
     private func tokenSnippet(from token: String) -> String {
