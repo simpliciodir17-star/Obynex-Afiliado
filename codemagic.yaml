@@ -1,0 +1,54 @@
+workflows:
+  ios_simulator_build:
+    name: iOS Simulator Build
+    environment:
+      xcode: latest
+    scripts:
+      - name: Install XcodeGen
+        script: brew install xcodegen
+      - name: Generate Xcode project
+        script: xcodegen generate
+      - name: Build for iOS Simulator
+        script: |
+          xcodebuild \
+            -project PartnerMirror.xcodeproj \
+            -scheme PartnerMirror \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -derivedDataPath build
+    artifacts:
+      - build/Build/Products/Debug-iphonesimulator/PartnerMirror.app
+
+  ios_unsigned_ipa:
+    name: iOS Unsigned IPA
+    environment:
+      xcode: latest
+    scripts:
+      - name: Install XcodeGen
+        script: brew install xcodegen
+      - name: Generate Xcode project
+        script: xcodegen generate
+      - name: Build without code signing
+        script: |
+          xcodebuild \
+            -project PartnerMirror.xcodeproj \
+            -scheme PartnerMirror \
+            -configuration Release \
+            -sdk iphoneos \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_IDENTITY="" \
+            -derivedDataPath build
+      - name: Package unsigned IPA
+        script: |
+          APP_PATH="build/Build/Products/Release-iphoneos/PartnerMirror.app"
+          if [ ! -d "$APP_PATH" ]; then
+            echo "App not found at $APP_PATH"
+            exit 1
+          fi
+          rm -rf Payload PartnerMirror-unsigned.ipa
+          mkdir Payload
+          cp -R "$APP_PATH" Payload/PartnerMirror.app
+          zip -r PartnerMirror-unsigned.ipa Payload
+    artifacts:
+      - PartnerMirror-unsigned.ipa
